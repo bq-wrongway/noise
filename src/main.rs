@@ -1,18 +1,21 @@
-use iced::{
-    advanced::Application,
-    executor,
-    program::{Appearance, DefaultStyle},
-    widget::{button, container, Column, Row},
-    window::Settings,
-    Command, Renderer, Theme,
-};
-use std::error::Error;
+use std::collections::HashMap;
 
+use iced::{
+    alignment::{Horizontal, Vertical},
+    executor,
+    widget::{button, container, row, text, Column, Row},
+    window::Settings,
+    Application, Command, Length, Theme,
+};
+
+use iced_aw::Wrap;
 use kira::{
     manager::{backend::DefaultBackend, AudioManager, AudioManagerSettings},
-    sound::static_sound::{StaticSoundData, StaticSoundSettings},
-    sound::streaming::{StreamingSoundData, StreamingSoundSettings},
-    sound::FromFileError,
+    sound::{
+        streaming::{StreamingSoundData, StreamingSoundHandle, StreamingSoundSettings},
+        FromFileError, PlaybackState,
+    },
+    tween::Tween,
 };
 
 pub fn main() -> iced::Result {
@@ -29,17 +32,17 @@ pub fn main() -> iced::Result {
 }
 
 struct Noise {
-    sound: Option<StaticSoundData>,
     manager: AudioManager,
-    // stream: Option<StreamingSoundData<dyn Error>>,
+    files: Vec<NoiseTrack>,
+    maper: HashMap<String, StreamingSoundHandle<FromFileError>>,
+    theme: Theme,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    File,
-    Play(Option<StaticSoundData>),
     Stream,
-    // StreamStart(Option<StreamingSoundData<dyn Error>>),
+    Print(NoiseTrack),
+    Theme,
 }
 
 impl Application for Noise {
@@ -47,18 +50,19 @@ impl Application for Noise {
     type Message = Message;
     type Theme = Theme;
     type Flags = ();
-    type Renderer = Renderer;
+    // type Renderer = Renderer;
 
     fn new(_flags: Self::Flags) -> (Self, iced::Command<Self::Message>) {
         (
             Self {
-                sound: None,
                 manager: AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
                     .ok()
                     .unwrap(),
-                // stream: None,
+                files: vec![],
+                maper: HashMap::new(),
+                theme: Theme::TokyoNight,
             },
-            Command::perform(get_file_test(), Message::Play),
+            Command::none(),
         )
     }
 
@@ -68,63 +72,96 @@ impl Application for Noise {
 
     fn update(&mut self, message: Self::Message) -> iced::Command<Self::Message> {
         match message {
-            Message::File => Command::perform(get_file(), Message::Play),
-            Message::Play(s) => {
-                println!("file will play...");
-                self.sound = s;
-                self.manager.play(self.sound.clone().unwrap()).unwrap();
-                Command::none()
-            }
             Message::Stream => {
-                // self.manager.play(self.stream.clone().unwrap()).unwrap();
+                for entry in walkdir::WalkDir::new("assets") {
+                    let entry = entry.unwrap();
+                    println!("{:?}", entry.file_name());
+                    if entry.path().is_file() {
+                        self.files.push(NoiseTrack {
+                            name: entry.file_name().to_str().unwrap().to_string(),
+                            path: entry.path().to_str().unwrap().to_string(),
+                            handle: false,
+                        });
+                    }
+                }
 
                 Command::none()
-            } // Message::StreamStart(s) => {
-              //     self.stream = s;
-              //     Command::none()
-              // }
+            }
+            Message::Print(track) => {
+                match self.maper.get_mut(&track.name) {
+                    Some(k) => match k.state() {
+                        PlaybackState::Playing => {
+                            k.pause(Tween::default());
+                        }
+                        _ => {
+                            k.resume(Tween::default());
+                        }
+                    },
+                    None => {
+                        let sound_data = StreamingSoundData::from_file(
+                            track.path,
+                            StreamingSoundSettings::default(),
+                        )
+                        .unwrap();
+                        let handler = self.manager.play(sound_data).unwrap();
+                        self.maper.insert(track.name, handler);
+                    }
+                }
+                Command::none()
+            }
+            Message::Theme => {
+                self.theme = Theme::Nord;
+                Command::none()
+            }
         }
     }
 
-    fn view(&self) -> iced::Element<'_, Self::Message, Self::Theme, Self::Renderer> {
-        let layout = Row::new();
-        let con = Column::new()
-            .push(button("Add").on_press(Message::Stream))
-            .push(button("Fetch").on_press(Message::File));
-        container(layout.push(con)).into()
+    fn view(&self) -> iced::Element<'_, Self::Message> {
+        let content = self.files.iter().fold(Wrap::new(), |rowe, str| {
+            rowe.push(
+                button(row![text(str.name.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .vertical_alignment(Vertical::Center)
+                    .horizontal_alignment(Horizontal::Center),])
+                .width(150.0)
+                .height(50.0)
+                .on_press(Message::Print(str.clone())),
+            )
+            .spacing(5.0)
+            .line_spacing(5.0)
+        });
+        let layout = Column::new();
+
+        container(
+            layout
+                .push(
+                    row!(
+                        button("Add").on_press(Message::Stream).height(40.0),
+                        button("theme").on_press(Message::Theme).height(40.0)
+                    )
+                    .width(Length::Fill),
+                )
+                .push(content)
+                .spacing(5.0),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     fn theme(&self) -> Self::Theme {
-        Self::Theme::default()
+        self.theme.clone()
     }
 
-    fn style(&self, theme: &Self::Theme) -> Appearance {
-        theme.default_style()
-    }
+    // fn style(&self, theme: &Self::Theme) -> Appearance {
+    //     theme.default_style()
+    // }
 }
 
-async fn get_file() -> Option<StaticSoundData> {
-    let settings = StaticSoundSettings::new().loop_region(0.0..);
-    println!("getting the file..");
-    let sound_data = StaticSoundData::from_file("rain.mp3", settings);
-    match sound_data {
-        Ok(s) => Some(s),
-        Err(_) => None,
-    }
+#[derive(Debug, Clone)]
+struct NoiseTrack {
+    name: String,
+    path: String,
+    handle: bool,
 }
-async fn get_file_test() -> Option<StaticSoundData> {
-    let settings = StaticSoundSettings::new().loop_region(0.0..);
-    println!("reach..");
-    let sound_data = StaticSoundData::from_file("rain.mp3", settings);
-    match sound_data {
-        Ok(s) => Some(s),
-        Err(_) => None,
-    }
-}
-//this function returns Result<StreamingSoundData<FromFileError>,FromFileError> i dont know how to deal with this exactly
-// async fn play_stream() -> Option<StreamingSoundData<dyn Error>> {
-//     const NOISE: &str = "rain.mp3";
-//     println!("reach..");
-//     let sound_data = StreamingSoundData::from_file(NOISE, StreamingSoundSettings::default()).ok();
-//     sound_data
-// }
