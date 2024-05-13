@@ -1,11 +1,12 @@
-use std::collections::HashMap;
-
+use std::{collections::HashMap, path::Path, time::Duration};
+mod files;
+use files::{get_stem, load_data, NoiseTrack};
 use iced::{
     alignment::{Horizontal, Vertical},
     executor,
-    widget::{button, container, row, text, Column, Row},
+    widget::{button, container, row, slider, text, vertical_slider::HandleShape, Column},
     window::Settings,
-    Application, Command, Length, Theme,
+    Application, Color, Command, Length, Theme,
 };
 
 use iced_aw::Wrap;
@@ -15,15 +16,20 @@ use kira::{
         streaming::{StreamingSoundData, StreamingSoundHandle, StreamingSoundSettings},
         FromFileError, PlaybackState,
     },
-    tween::Tween,
+    tween::{Easing, Tween},
+    StartTime,
 };
-
+const LINEAR_TWEEN: Tween = Tween {
+    duration: Duration::from_secs(1),
+    easing: Easing::Linear,
+    start_time: StartTime::Immediate,
+};
 pub fn main() -> iced::Result {
     Noise::run(iced::Settings {
         window: Settings {
             size: iced::Size {
-                width: 300.0,
-                height: 400.0,
+                width: 600.0,
+                height: 800.0,
             },
             ..Default::default()
         },
@@ -34,15 +40,15 @@ pub fn main() -> iced::Result {
 struct Noise {
     manager: AudioManager,
     files: Vec<NoiseTrack>,
-    maper: HashMap<String, StreamingSoundHandle<FromFileError>>,
+    currently_playing: HashMap<String, StreamingSoundHandle<FromFileError>>,
     theme: Theme,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    Stream,
-    Print(NoiseTrack),
+    Play(String),
     Theme,
+    VolumeChanged((f32, String)),
 }
 
 impl Application for Noise {
@@ -58,9 +64,9 @@ impl Application for Noise {
                 manager: AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
                     .ok()
                     .unwrap(),
-                files: vec![],
-                maper: HashMap::new(),
-                theme: Theme::TokyoNight,
+                files: load_data(),
+                currently_playing: HashMap::new(),
+                theme: Theme::TokyoNightStorm,
             },
             Command::none(),
         )
@@ -72,39 +78,27 @@ impl Application for Noise {
 
     fn update(&mut self, message: Self::Message) -> iced::Command<Self::Message> {
         match message {
-            Message::Stream => {
-                for entry in walkdir::WalkDir::new("assets") {
-                    let entry = entry.unwrap();
-                    println!("{:?}", entry.file_name());
-                    if entry.path().is_file() {
-                        self.files.push(NoiseTrack {
-                            name: entry.file_name().to_str().unwrap().to_string(),
-                            path: entry.path().to_str().unwrap().to_string(),
-                            handle: false,
-                        });
-                    }
-                }
-
-                Command::none()
-            }
-            Message::Print(track) => {
-                match self.maper.get_mut(&track.name) {
+            Message::Play(track) => {
+                match self.currently_playing.get_mut(&get_stem(Path::new(&track))) {
                     Some(k) => match k.state() {
                         PlaybackState::Playing => {
-                            k.pause(Tween::default());
+                            k.pause(LINEAR_TWEEN).unwrap();
                         }
                         _ => {
-                            k.resume(Tween::default());
+                            k.resume(LINEAR_TWEEN).unwrap();
                         }
                     },
                     None => {
-                        let sound_data = StreamingSoundData::from_file(
-                            track.path,
-                            StreamingSoundSettings::default(),
-                        )
-                        .unwrap();
+                        //removed tween when starting initially
+                        let settings = StreamingSoundSettings::new().loop_region(0.0..);
+                        let sound_data =
+                            StreamingSoundData::from_file(Path::new(&track), settings).unwrap();
+                        // println!("{:?}", sound_data.duration());
+
                         let handler = self.manager.play(sound_data).unwrap();
-                        self.maper.insert(track.name, handler);
+
+                        self.currently_playing
+                            .insert(get_stem(Path::new(&track)), handler);
                     }
                 }
                 Command::none()
@@ -113,20 +107,47 @@ impl Application for Noise {
                 self.theme = Theme::Nord;
                 Command::none()
             }
+            Message::VolumeChanged(level) => {
+                println!("{:?}", level);
+                let (f, s) = level;
+
+                match self.currently_playing.get_mut(&s) {
+                    Some(t) => {
+                        t.set_volume(f as f64, Tween::default()).unwrap();
+                        let i = self.files.iter().position(|r| r.name == s).unwrap();
+                        let aass = self.files.get_mut(i).unwrap();
+                        aass.volume_level = f;
+                    }
+                    None => {
+                        println!("asd");
+                    }
+                }
+
+                Command::none()
+            }
         }
     }
 
     fn view(&self) -> iced::Element<'_, Self::Message> {
-        let content = self.files.iter().fold(Wrap::new(), |rowe, str| {
-            rowe.push(
-                button(row![text(str.name.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .vertical_alignment(Vertical::Center)
-                    .horizontal_alignment(Horizontal::Center),])
+        let content = self.files.iter().fold(Wrap::new(), |w, t| {
+            w.push(
+                button(iced::widget::column![
+                    text(&t.name)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .vertical_alignment(Vertical::Center)
+                        .horizontal_alignment(Horizontal::Center),
+                    slider(0.0..=1.0, t.volume_level, |x| Message::VolumeChanged((
+                        x,
+                        t.name.clone()
+                    )))
+                    .style(iced::theme::Slider::Custom(Box::new(CustomSlider::Active)))
+                    .step(0.01)
+                    .height(10.0)
+                ])
                 .width(150.0)
-                .height(50.0)
-                .on_press(Message::Print(str.clone())),
+                .height(80.0)
+                .on_press(Message::Play(t.path.clone())),
             )
             .spacing(5.0)
             .line_spacing(5.0)
@@ -136,11 +157,8 @@ impl Application for Noise {
         container(
             layout
                 .push(
-                    row!(
-                        button("Add").on_press(Message::Stream).height(40.0),
-                        button("theme").on_press(Message::Theme).height(40.0)
-                    )
-                    .width(Length::Fill),
+                    row!(button("Theme tbd").on_press(Message::Theme).height(40.0))
+                        .width(Length::Fill),
                 )
                 .push(content)
                 .spacing(5.0),
@@ -159,9 +177,61 @@ impl Application for Noise {
     // }
 }
 
-#[derive(Debug, Clone)]
-struct NoiseTrack {
-    name: String,
-    path: String,
-    handle: bool,
+// Define your custom style here
+pub enum CustomSlider {
+    Active,
+    Disabled,
+}
+const COLOR: Color = Color::from_rgba(1.0, 152.0 / 255.0, 0.0 / 255.0, 1.0);
+
+impl slider::StyleSheet for CustomSlider {
+    type Style = iced::Theme;
+
+    fn active(&self, _style: &Self::Style) -> slider::Appearance {
+        slider::Appearance {
+            rail: slider::Rail {
+                colors: (COLOR, COLOR),
+                width: 4.0,
+                border_radius: 2.0.into(),
+            },
+            handle: iced::widget::slider::Handle {
+                shape: HandleShape::Circle { radius: 6.0 },
+                color: COLOR,
+                border_width: 2.,
+                border_color: COLOR,
+            },
+        }
+    }
+
+    fn hovered(&self, _style: &Self::Style) -> slider::Appearance {
+        slider::Appearance {
+            rail: slider::Rail {
+                colors: (COLOR, COLOR),
+                width: 4.0,
+                border_radius: 2.0.into(),
+            },
+            handle: iced::widget::slider::Handle {
+                shape: HandleShape::Circle { radius: 6.0 },
+                color: COLOR,
+                border_width: 2.,
+                border_color: COLOR,
+            },
+        }
+    }
+
+    fn dragging(&self, _style: &Self::Style) -> slider::Appearance {
+        slider::Appearance {
+            rail: slider::Rail {
+                colors: (COLOR, COLOR),
+                width: 4.0,
+                border_radius: 2.0.into(),
+            },
+            handle: iced::widget::slider::Handle {
+                shape: HandleShape::Circle { radius: 6.0 },
+                color: COLOR,
+                border_width: 2.,
+                border_color: COLOR,
+            },
+        }
+    } // actually implement the trait
 }
